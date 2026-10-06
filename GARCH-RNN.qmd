@@ -13,8 +13,6 @@ execute:
   warning: false
   message: false
 editor: visual
-jupyter: python3
-python: "C:\\Program Files\\Python313\\python.exe"
 ---
 
 ```{=html}
@@ -100,7 +98,7 @@ Using XRP historical data from June 2019 until May 2026, using 2556 day trading 
 
 ```{python}
 #| echo: false
-df = pd.read_csv('XRP Historical Data.csv', sep = ';')
+df = pd.read_csv('data/XRP Historical Data.csv', sep = ';')
 print(pd.concat([df.head(5), pd.DataFrame({col: ['...'] for col in df.columns}, index=['...']), df.tail(5)]))
 returns = df.Return * 100
 
