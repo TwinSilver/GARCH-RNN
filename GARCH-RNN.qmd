@@ -1,0 +1,422 @@
+---
+title: "Equivalency Between GARCH and RNN"
+author: "Hisyam Maheswara Kusuma Saputro"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: false
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+editor: visual
+jupyter: python3
+python: "C:\\Program Files\\Python313\\python.exe"
+---
+
+```{=html}
+<style>
+p {
+  text-align: justify;
+}
+</style>
+```
+
+------------------------------------------------------------------------
+
+# Introduction
+
+Volatility modeling is a foundational component of modern financial modeling, mostly executed using econometrics. This project explores the concept of interpretability within Neural Network, explicitly demonstrating how a Recurrent Neural Network (RNN) can be structurally constrained to mimic a GARCH model. By transitioning the neural network from a black-box model into an interpretable statistical model, the model can preserve full interpretability while leveraging the computational scalability of neural network.
+
+# Models and Equivalency
+
+## GARCH
+
+Given GARCH(1,1) model, which portrays conditional variance as a linear combination of past squared innovations and past conditional variance.
+
+$$\sigma^2_t=\omega+\alpha\varepsilon^2_{t-1}+\beta\sigma^2_{t-1}$$
+
+To preserve convergency, the parameters is strictly constrained to prevent negative variance and ensure covariance stationarity:
+
+1.  Non-negativity: $\omega > 0$, $\alpha \ge 0$, $\beta \ge 0$
+
+2.  Stationarity: $\alpha + \beta < 1$
+
+## Recurrent Neural Network and Equivalency
+
+A standard Recurrent Neural Network with a single hidden state $h_t$ is defined by,
+
+$$ 
+\begin{align}
+h_t&=f(W_hh_{t-1}+W_xX_t+bias_1)\\
+y_t&=W_yh_t+bias_2 
+\end{align}$$
+
+where mathematical equivalency between GARCH and RNN is achieved by applying these constraints:
+
+- Set the activation function $f(x)$ to identity function $\left(f(x)=x\right)$.
+
+- Force $W_y=1$ and $bias_2=0$.
+
+- Map the input $\varepsilon^2_{t-1}\to X_t$.
+
+To enforce GARCH constraints onto the equivalent RNN model, the parameters are mapped such as:
+
+- $\omega= \ln{\left(1+e^{\omega_{raw}}\right)}$ (Ensures $\omega>0$)
+
+- To guarantee $\alpha+\beta<1$ dynamically: $$  
+  \begin{align}
+  \text{sum}_{parameters} &= \text{Sigmoid}(\alpha_{raw})\times0.999 \\
+  \text{ratio} &= \text{Sigmoid}(\beta_{raw}) \\
+  \alpha &= \text{sum}_{parameters} \times (1 - \text{ratio}) \\
+  \beta &= \text{sum}_{parameters} \times \text{ratio}
+  \end{align}$$
+
+# Library & Dataset
+
+For this project, the used library is:
+
+```{python}
+# Essential Library
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
+# GARCH library
+from arch import arch_model
+
+# RNN Library
+import torch
+import torch.nn as nn
+import torch.optim as optim
+```
+
+Using XRP historical data from June 2019 until May 2026, using 2556 day trading in total. Daily log return is multiplied by 100 for numerical stability purpose.
+
+```{python}
+#| echo: false
+df = pd.read_csv('XRP Historical Data.csv', sep = ';')
+print(pd.concat([df.head(5), pd.DataFrame({col: ['...'] for col in df.columns}, index=['...']), df.tail(5)]))
+returns = df.Return * 100
+
+# 2. Plot the scaled returns using a crisp, slate color and thin line weight
+plt.plot(returns, 
+         color='#d62728', 
+         linewidth=0.75, 
+         alpha=0.85, 
+         label='Daily Return')
+
+# 3. Add a baseline at zero to emphasize positive/negative shocks
+plt.axhline(0, color='black', linewidth=0.5, alpha=0.5, linestyle=':')
+
+# 4. Professional Chart Architecture
+plt.title('XRP Historical Data: Daily Scaled Returns', fontsize=14, pad=15, weight='bold')
+plt.xlabel('Trading Days', fontsize=12)
+plt.ylabel('Daily Return (%)', fontsize=12)
+
+# Set tight bounds on the x-axis to eliminate empty margins
+plt.xlim(0, len(returns))
+
+# 5. Fine-Tuning Grid and Spines for Quarto Portfolio Look
+plt.grid(True, alpha=0.15, linestyle='--')
+plt.gca().spines['top'].set_visible(False)
+plt.gca().spines['right'].set_visible(False)
+plt.gca().spines['left'].set_alpha(0.3)
+plt.gca().spines['bottom'].set_alpha(0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+From the time series plot, it's apparent that XRP has high density volatility clustering and some extreme price change.
+
+# Model Fitting
+
+## GARCH (using MLE)
+
+Using standard GARCH(1, 1) model from `arch` library, the parameter is estimated via Maximum Likelihood Estimation with zero mean model and using normal distribution.
+
+```{python}
+am = arch_model(returns, vol="GARCH", p = 1, q = 1, mean = "Zero", dist="normal")
+res = am.fit()
+res.summary()
+```
+
+The optimization converges on the following conditional variance specification:
+
+$$\sigma^2_t=3.7213+0.2804\varepsilon^2_{t-1}+0.6271\sigma^2_{t-1}$$
+
+The long-run persistence of the volatility is calculated to evaluate the memory decay rate of market shocks:
+
+$$\alpha+\beta=0.280376+0.627134=0.907510$$
+
+## RNN
+
+The structure of the RNN is given as follows, built using PyTorch.
+
+```{python}
+# For reproducibility
+random.seed(69420)
+
+# For random initial values
+s = random.uniform(0.5, 0.98)
+r = random.uniform(0.1, 0.9)
+
+class GARCHRNN(nn.Module):
+    def __init__(self):
+        super(GARCHRNN, self).__init__()
+
+        # Parameters initialization
+        self.omega_raw = nn.Parameter(torch.tensor([0.01]))
+        self.alpha_raw = nn.Parameter(torch.tensor([s * r]))
+        self.beta_raw = nn.Parameter(torch.tensor([s * (1 - r)]))
+    
+    # Forward pass
+    def forward(self, eps_sq):
+        n_t = eps_sq.size(0)
+
+        # Parameters constraints
+        w = torch.log(1 + torch.exp(self.omega_raw))
+        sum_param = torch.sigmoid(self.alpha_raw) * 0.999
+        ratio = torch.sigmoid(self.beta_raw)
+        a = sum_param * (1 - ratio)
+        b = sum_param * ratio
+
+        # Initializing first hidden state value
+        h = []
+        h.append(w / (1 - a - b + 1e-6))
+
+        # Custom loop
+        for t in range(1, n_t):
+            h_t = w + a * eps_sq[t - 1] + b * h[t - 1]
+            h.append(h_t)
+
+        return torch.stack(h)
+```
+
+The model is trained using Adam optimizer with 512 epochs, using negative log-likelihood from GARCH model as the loss function.
+
+```{python}
+epsilon_sq_np = np.array(returns ** 2, dtype = np.float32)
+epsilon_sq_tensor = torch.tensor(epsilon_sq_np, dtype = torch.float32).view(-1, 1)
+
+# Custom loss function (Negative Log-Likelihood)
+def nll(h, eps_sq):
+    return torch.mean(torch.log(h) + (eps_sq / h))
+
+# Model training phase
+torch.manual_seed(69420)
+model = GARCHRNN()
+optimizer = optim.Adam(model.parameters(), lr = 0.01)
+
+epochs = 512
+loss_history = []
+
+print("Starting optimization loop...")
+for epoch in range(epochs):
+    optimizer.zero_grad()
+    h_t = model(epsilon_sq_tensor)
+    loss = nll(h_t, epsilon_sq_tensor)
+    loss.backward()
+    optimizer.step()
+    loss_history.append(loss.item())
+    
+    if (epoch + 1) % 64 == 0 or epoch == 0:
+        print(f"Epoch {epoch+1:03d}/{epochs} | Negative Log-Likelihood: {loss.item():.5f}")
+
+print("\nOptimization complete.")
+```
+
+The optimization converges on the following conditional variance specification:
+
+$$\sigma^2_t=1.985587+0.125141\varepsilon^2_{t-1}+0.776272\sigma^2_{t-1}$$
+
+The long-run persistence of the volatility is calculated to evaluate the memory decay rate of market shocks:
+
+$$ \alpha+\beta=0.125141+0.776272=0.901413 $$
+
+The loss plot shows a smooth asymptotic minimization of the loss function, confirming stable convergence during training phase.
+
+```{python}
+#| echo: false
+# 2. Plot the loss history
+plt.plot(loss_history, 
+         color='#d62728', # Standard Matplotlib red
+         linewidth=2.5, 
+         alpha=0.85,
+         label='Negative Log-Likelihood')
+
+# 3. Professional Formatting
+plt.title('Optimization Convergence: Constrained RNN', fontsize=14, pad=15)
+plt.xlabel('Training Epochs', fontsize=12)
+plt.ylabel('Negative Log-Likelihood (Loss)', fontsize=12)
+
+# 4. Add styling elements for a polished portfolio look
+plt.grid(True, alpha=0.3, linestyle='--')
+plt.legend(frameon=True, facecolor='white', framealpha=1, fontsize=11)
+plt.xlim(0, len(loss_history)) # Ensure the x-axis fits the data perfectly
+
+# Remove top and right borders for a cleaner aesthetic
+plt.gca().spines['top'].set_visible(False)
+plt.gca().spines['right'].set_visible(False)
+
+plt.tight_layout()
+plt.show()
+```
+
+# Model Comparison
+
+```{python}
+#| echo: false
+mle_omega = res.params['omega']
+mle_alpha = res.params['alpha[1]']
+mle_beta = res.params['beta[1]']
+mle_variance = res.conditional_volatility ** 2
+
+with torch.no_grad():
+    # 1. True Omega (softplus)
+    rnn_omega = torch.log(1 + torch.exp(model.omega_raw)).item()
+    
+    # 2. Get the sum and ratio components
+    final_sum = torch.sigmoid(model.alpha_raw).item() * 0.999
+    final_ratio = torch.sigmoid(model.beta_raw).item()
+    
+    # 3. Calculate true Alpha and Beta
+    rnn_alpha = final_sum * (1.0 - final_ratio)
+    rnn_beta  = final_sum * final_ratio
+
+# 2. Build the comparison matrix
+# (This assumes you still have mle_omega, mle_alpha, mle_beta in memory from the 'arch' library)
+comparison_df = pd.DataFrame({
+    "Parameter": ["Omega (Bias)", "Alpha (Input Weight)", "Beta (Recurrent Weight)"],
+    "GARCH via MLE (arch)": [mle_omega, mle_alpha, mle_beta],
+    "RNN": [rnn_omega, rnn_alpha, rnn_beta]
+})
+
+print("------------- Models Convergence Results -------------")
+print(comparison_df.to_string(index=False))
+```
+
+A key finding is that RNN model has lower immediate shock response ($\alpha=0.125...$) and higher memory ($\beta=0.776...$) relative to standard GARCH. Both model has almost identical total volatility persistence ($\alpha+\beta\approx0.90$).
+
+This demonstrates the Flat Likelihood Valley phenomenon in optimization. Because, multiple combinations of $\alpha$ and $\beta$ summing to $\sim0.90...$ yield nearly equivalent log-likelihood values, first-order gradient optimizer (Adam) navigate the resulting plateau differently than second-order solvers (BFGS). The RNN identifies a smoother, more persistent local minimum that tracks the overarching volatility process with high stability.
+
+```{python}
+#| echo: false
+with torch.no_grad():
+    # Run the forward pass one last time and convert the tensor to a flat numpy array
+    rnn_variance_series = model(epsilon_sq_tensor).numpy().flatten()
+
+# Plot the classical variance (from the arch library)
+plt.plot(mle_variance, 
+         label='GARCH(1,1) Fitted', 
+         color='#1f77b4', # Standard Matplotlib blue
+         alpha=0.7, 
+         linewidth=2)
+
+# Plot the neural network's hidden state
+plt.plot(rnn_variance_series, 
+         label='RNN Fitted', 
+         color='#ff7f0e', # Standard Matplotlib orange
+         linestyle='--', 
+         alpha=0.9, 
+         linewidth=2)
+
+# Professional Formatting
+plt.title('Fitted values: GARCH vs. RNN', fontsize=14, pad=15)
+plt.xlabel('Time Steps (Days)', fontsize=12)
+plt.ylabel('Conditional Variance', fontsize=12)
+plt.legend(frameon=True, facecolor='white', framealpha=1)
+plt.grid(True, alpha=0.3, linestyle=':')
+plt.tight_layout()
+
+plt.show()
+```
+
+To validate the model's utility, a Value-at-Risk (VaR) backtest was implemented at a 95% confidence level on upper and lower direction. This framework tracks both long risk (downside breach) and short risk (upside breach) across the 2,556-day evaluation period.
+
+```{python}
+#| echo: false
+z_score = norm.ppf(0.95)
+
+mle_vol = res.conditional_volatility
+
+with torch.no_grad():
+    rnn_var = model(epsilon_sq_tensor).numpy().flatten()
+rnn_vol = np.sqrt(rnn_var)
+
+mle_plus_threshold = z_score * mle_vol
+rnn_plus_threshold = z_score * rnn_vol
+
+mle_min_threshold = -z_score * mle_vol
+rnn_min_threshold = -z_score * rnn_vol
+
+mle_plus_violation = np.sum(returns > mle_plus_threshold)
+rnn_plus_violation = np.sum(returns > rnn_plus_threshold)
+
+mle_min_violation = np.sum(returns < mle_min_threshold)
+rnn_min_violation = np.sum(returns < rnn_min_threshold)
+
+total_mle_violation = mle_min_violation + mle_plus_violation
+total_rnn_violation = rnn_min_violation + rnn_plus_violation
+
+n_days = len(returns)
+print("--------------- VaR Backtesting Result ---------------")
+print(f"Total Observations       :  {n_days} days")
+print(f"Expected Total Violation :  2 x 5% = 10.00% ({n_days * 0.10:.0f} days)")
+print(f"RNN Total Violations     :  {total_rnn_violation} ({(total_rnn_violation/n_days)*100:.2f}%)")
+print(f"└───  Positive (Short)   :  {rnn_plus_violation} ({(rnn_plus_violation/n_days)*100:.2f}%)")
+print(f"└───  Negative (Long)    :  {rnn_min_violation}  ({(rnn_min_violation/n_days)*100:.2f}%)")
+print(f"GARCH  Total Violations  :  {total_mle_violation} ({(total_mle_violation/n_days)*100:.2f}%)")
+print(f"└───  Positive (Short)   :  {mle_plus_violation}  ({(mle_plus_violation/n_days)*100:.2f}%)")
+print(f"└───  Negative (Long)    :  {mle_min_violation}  ({(mle_min_violation/n_days)*100:.2f}%)")
+```
+
+```{python}
+#| echo: false
+# Plot actual returns
+plt.plot(returns, color='grey', alpha=0.8, label='Daily Returns (%)')
+
+# Plot MLE Dynamic Boundaries
+plt.plot(mle_plus_threshold, color='#1f77b4', alpha=0.5, label='GARCH Upper/Lower Bounds')
+plt.plot(mle_min_threshold, color='#1f77b4', alpha=0.5)
+
+# Plot RNN Dynamic Boundaries
+plt.plot(rnn_plus_threshold, color='#ff7f0e', linestyle='--', linewidth=1.5, label='RNN Upper/Lower Bounds')
+plt.plot(rnn_min_threshold, color='#ff7f0e', linestyle='--', linewidth=1.5)
+
+# Highlight RNN Breaches
+rnn_breaches = np.where((returns > rnn_plus_threshold) | (returns < rnn_min_threshold))[0]
+plt.scatter(rnn_breaches, returns[rnn_breaches], color='#ff7f0e', s=20, zorder=5, label='RNN Breach')
+
+# Highlight MLE Breaches
+mle_breaches = np.where((returns > mle_plus_threshold) | (returns < mle_min_threshold))[0]
+plt.scatter(mle_breaches, returns[mle_breaches], edgecolors='#1f77b4', facecolors='none', s=50, linewidths=1.5, zorder=4, label='GARCH Breach')
+
+# Formatting
+plt.title('5% VaR Backtesting on Both Models (Both directions)', fontsize=14, pad=15)
+plt.xlabel('Trading Days', fontsize=12)
+plt.ylabel('Returns (%)', fontsize=12)
+plt.legend(frameon=True, facecolor='white', loc='upper right')
+plt.grid(True, alpha=0.2, linestyle=':')
+plt.tight_layout()
+
+plt.show()
+```
+
+Model Evaluation & Volatility Analysis:
+
+- Model Evaluation: The theoretical target for the combined bi-directional boundary is a 10.00% violation rate. The PyTorch RNN achieved 7.82%, outperforming the classical MLE baseline (6.77%) by tracking significantly closer to the true statistical specification.
+
+- Volatility Portrayed by Both Models: The classical MLE model exhibits structural over-conservatism, generating wider risk envelopes that lock up unnecessary capital buffers. Because the RNN adapts more accurately along the local variance surface, it optimizes capital utilization without crossing the line into regulatory under-protection.
+
+- Tail Asymmetry Insight: Both models show higher violation rates on positive returns compared to negative returns. This occurs because symmetric GARCH structures do not account for leverage transitions, meaning that aggressive upward shifts in cryptocurrency markets can compress lower boundary protections and expose short-side risk portfolios.
+
+# Conclusion
+
+This project successfully demonstrates that neural networks can be structurally bound to classical econometric models without losing their interpretability properties. The constrained RNN matches the core utility of traditional GARCH model while offering superior operational flexibility. For institutional risk applications, this architecture provides a reliable pathway to embed structural econometric priors directly into broad multi-asset deep learning pipelines.
